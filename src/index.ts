@@ -7,11 +7,14 @@
  */
 
 export const name = "dsh-tide-hint";
-export const inject = ["webServer"];
+export const inject = ["webServer", "credentials"];
 
 const ROUTE_PATH = "/api/dsh-tide-hint/official";
+const BALANCE_ROUTE_PATH = "/api/dsh-tide-hint/balance";
 const FETCH_TIMEOUT_MS = 5_000;
 const MAX_TEXT_BYTES = 2_000_000;
+const PLATFORM_CREDENTIAL_REF = "deepseek-account-platform/default";
+const PLATFORM_BALANCE_URL = "https://platform.deepseek.com/api/v0/users/get_user_summary";
 
 /** 固定白名单：客户端无法指定任意 URL。 */
 const RESOURCE_URLS = Object.freeze({
@@ -30,6 +33,10 @@ interface HostContext {
       path: string;
       handler: (req: HostRequest, res: HostResponse) => void | Promise<void>;
     }): () => void;
+  };
+  credentials?: {
+    resolve(ref: string): Promise<unknown>;
+    readRecord?(key: string): Promise<unknown>;
   };
   logger?: {
     warn?: (message: unknown) => void;
@@ -53,6 +60,14 @@ interface HostResponse {
 
 interface ConnectionFace {
   requestRejection?: (request: HostRequest) => unknown;
+}
+
+interface CredentialResolution {
+  value?: unknown;
+  token?: unknown;
+  payload?: {
+    token?: unknown;
+  };
 }
 
 function headerValue(req: HostRequest, name: string): string {
@@ -151,9 +166,15 @@ async function fetchOfficial(url: string): Promise<string> {
   throw lastError instanceof Error ? lastError : new Error("官方页面读取失败");
 }
 
-function sendText(res: HostResponse, status: number, body: string, sourceUrl?: string): void {
+function sendText(
+  res: HostResponse,
+  status: number,
+  body: string,
+  sourceUrl?: string,
+  contentType = "text/plain; charset=utf-8",
+): void {
   const headers: Record<string, string> = {
-    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Type": contentType,
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
   };
@@ -164,6 +185,65 @@ function sendText(res: HostResponse, status: number, body: string, sourceUrl?: s
 
 function sendError(res: HostResponse, status: number, reason: string): void {
   sendText(res, status, reason);
+}
+
+function sendJson(res: HostResponse, status: number, value: unknown): void {
+  sendText(res, status, JSON.stringify(value), undefined, "application/json; charset=utf-8");
+}
+
+function tokenOfResolvedCredential(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return null;
+  const resolved = value as CredentialResolution;
+  for (const candidate of [resolved.value, resolved.token, resolved.payload?.token]) {
+    if (typeof candidate === "string" && candidate !== "") return candidate;
+  }
+  return null;
+}
+
+async function fetchPlatformBalance(token: string): Promise<number | null> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(PLATFORM_BALANCE_URL, {
+        method: "GET",
+        redirect: "error",
+        credentials: "omit",
+        headers: {
+          Accept: "application/json",
+          "x-dsh-auth-token": token,
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json() as {
+        data?: {
+          biz_code?: number;
+          biz_data?: {
+            normal_wallets?: Array<{ balance?: unknown; currency?: unknown }>;
+          };
+        };
+      };
+      if (body.data?.biz_code !== 0) return null;
+      const wallets = Array.isArray(body.data.biz_data?.normal_wallets)
+        ? body.data.biz_data.normal_wallets
+        : [];
+      const cny = wallets
+        .filter((wallet) => wallet.currency === "CNY")
+        .map((wallet) => Number(wallet.balance))
+        .filter((value) => Number.isFinite(value) && value >= 0);
+      if (cny.length === 0) return null;
+      return cny.reduce((sum, value) => sum + value, 0);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) await sleep(180);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("官方余额读取失败");
 }
 
 export function apply(ctx: HostContext): void {
@@ -202,5 +282,51 @@ export function apply(ctx: HostContext): void {
     ctx.effect(register, "dsh-tide-hint: official read-only proxy");
   } else {
     register();
+  }
+
+  const registerBalance = () => ctx.webServer.register({
+    kind: "exact",
+    path: BALANCE_ROUTE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== "GET") {
+        sendError(res, 405, "只允许只读 GET");
+        return;
+      }
+      if (!isTrustedRequest(ctx, req)) {
+        sendError(res, 403, "只允许本机 DSH 请求");
+        return;
+      }
+      const credentials = ctx.credentials ?? ctx.get?.("credentials", false) as HostContext["credentials"];
+      if (!credentials || typeof credentials.resolve !== "function") {
+        sendJson(res, 503, { ok: false, error: "credentials-unavailable" });
+        return;
+      }
+      try {
+        const resolved = typeof credentials.readRecord === "function"
+          ? await credentials.readRecord(PLATFORM_CREDENTIAL_REF)
+          : await credentials.resolve(PLATFORM_CREDENTIAL_REF);
+        const token = tokenOfResolvedCredential(resolved);
+        if (token === null) {
+          sendJson(res, 503, { ok: false, error: "account-token-unavailable" });
+          return;
+        }
+        const balanceCny = await fetchPlatformBalance(token);
+        sendJson(res, 200, {
+          ok: balanceCny !== null,
+          balanceCny,
+          sourceUrl: PLATFORM_BALANCE_URL,
+          updatedAt: Date.now(),
+        });
+      } catch {
+        ctx.logger?.warn?.("dsh-tide-hint: 官方账户余额读取失败");
+        sendJson(res, 502, { ok: false, error: "balance-unavailable" });
+      }
+    },
+  });
+
+  if (typeof ctx.effect === "function") {
+    ctx.effect(registerBalance, "dsh-tide-hint: official balance route");
+  } else {
+    registerBalance();
   }
 }

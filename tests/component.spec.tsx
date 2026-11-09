@@ -375,11 +375,10 @@ describe("每日首次刷新与降级", () => {
   it("充值页无余额时使用 DSH 同源余额并折算 token", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("deepseek-usage")) {
+      if (url.includes("dsh-tide-hint/balance")) {
         return new Response(JSON.stringify({
           ok: true,
-          provider: { kind: "balance" },
-          balance: { isAvailable: true, total: 16, currency: "CNY" },
+          balanceCny: 16,
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       return url.includes("resource=offer")
@@ -396,7 +395,7 @@ describe("每日首次刷新与降级", () => {
     expect(screen.getAllByText(/≈ 0\.08 亿 tokens/).length).toBeGreaterThan(0);
     expect(JSON.parse(localStorage.getItem(OFFER_CACHE_KEY) || "{}")).toMatchObject({
       balanceCny: 16,
-      balanceSource: "dsh-usage",
+      balanceSource: "official-api",
       balanceAttempted: true,
     });
     harness.dispose();
@@ -406,11 +405,10 @@ describe("每日首次刷新与降级", () => {
     installDailyCache();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("deepseek-usage")) {
+      if (url.includes("dsh-tide-hint/balance")) {
         return new Response(JSON.stringify({
           ok: true,
-          provider: { kind: "balance" },
-          balance: { isAvailable: true, total: 20, currency: "CNY" },
+          balanceCny: 20,
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       return url.includes("resource=offer")
@@ -429,14 +427,14 @@ describe("每日首次刷新与降级", () => {
     expect(screen.getAllByText(/≈ 0\.10 亿 tokens/).length).toBeGreaterThan(0);
     expect(JSON.parse(localStorage.getItem(OFFER_CACHE_KEY) || "{}")).toMatchObject({
       balanceCny: 20,
-      balanceSource: "dsh-usage",
+      balanceSource: "official-api",
     });
     harness.dispose();
   });
 
   it("超时后仍渲染倒计时，不抛错白屏", async () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => (
-      String(input).includes("deepseek-usage")
+      String(input).includes("dsh-tide-hint/balance")
         ? Promise.resolve(okResponse(JSON.stringify({ ok: false })))
         : new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener("abort", () => {

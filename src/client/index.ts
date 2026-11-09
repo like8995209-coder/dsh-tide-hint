@@ -69,7 +69,7 @@ export interface OfferSnapshot {
   fetchedAt: string | null;
   status: "idle" | "ok" | "error";
   balanceCny: number | null;
-  balanceSource: "topup" | "dsh-usage" | null;
+  balanceSource: "topup" | "official-api" | null;
   balanceAttempted: boolean;
 }
 
@@ -684,7 +684,7 @@ export function loadCachedOffer(storage: Storage | null = storageOf()): OfferSna
       balanceCny: typeof value.balanceCny === "number" && Number.isFinite(value.balanceCny) && value.balanceCny >= 0
         ? value.balanceCny
         : null,
-      balanceSource: value.balanceSource === "topup" || value.balanceSource === "dsh-usage"
+      balanceSource: value.balanceSource === "topup" || value.balanceSource === "official-api"
         ? value.balanceSource
         : null,
       balanceAttempted: value.balanceAttempted === true,
@@ -762,30 +762,24 @@ async function fetchOfficialDocument(resource: "pricing" | "offer"): Promise<{ h
 }
 
 /**
- * 兼容公开充值页不返回账户余额的情况：读取同一 DSH 内已安装的
- * `@dougen/dsh-deepseek-usage` 同源只读路由。本插件不接触或保存 Token，
- * 只读取它已经取到的余额数字；接口不存在或失败时返回 null。
+ * 公开充值页不返回登录后余额时，由本插件宿主半区使用 DSH 已保存的平台账户
+ * 凭据调用官方 `/user/get_user_summary`。浏览器只读同源结果，永远拿不到 Token。
  */
-async function fetchDshUsageBalance(): Promise<number | null> {
+async function fetchOfficialPlatformBalance(): Promise<number | null> {
   try {
-    const response = await fetchTextWithTimeout("api/deepseek-usage?lang=zh", FETCH_TIMEOUT_MS);
+    const response = await fetchTextWithTimeout("api/dsh-tide-hint/balance", FETCH_TIMEOUT_MS);
     if (!response.ok) return null;
     const body = await response.json() as {
       ok?: boolean;
-      provider?: { kind?: string };
-      balance?: { isAvailable?: boolean | null; total?: number | null; currency?: string | null };
+      balanceCny?: number | null;
     };
-    const balance = body.balance;
     if (
       body.ok !== true
-      || (body.provider?.kind !== "balance" && body.provider?.kind !== undefined)
-      || balance?.isAvailable === false
-      || typeof balance?.total !== "number"
-      || !Number.isFinite(balance.total)
-      || balance.total < 0
+      || typeof body.balanceCny !== "number"
+      || !Number.isFinite(body.balanceCny)
+      || body.balanceCny < 0
     ) return null;
-    if (balance.currency !== null && balance.currency !== undefined && balance.currency !== "CNY") return null;
-    return balance.total;
+    return body.balanceCny;
   } catch {
     return null;
   }
@@ -799,8 +793,8 @@ async function resolveOfferSnapshot(
   let balanceCny = topupHtml === null ? null : parseOfficialBalance(topupHtml);
   let balanceSource: OfferSnapshot["balanceSource"] = balanceCny === null ? null : "topup";
   if (balanceCny === null) {
-    balanceCny = await fetchDshUsageBalance();
-    if (balanceCny !== null) balanceSource = "dsh-usage";
+    balanceCny = await fetchOfficialPlatformBalance();
+    if (balanceCny !== null) balanceSource = "official-api";
   }
 
   // 刷新失败时保留上次有效余额；成功但确实无余额时清空，避免伪造数字。
@@ -1120,9 +1114,9 @@ function createMountedHint(React: ReactRuntime, runtime: ReturnType<typeof creat
     const balanceWarning = snapshot.offer.balanceCny !== null
       ? null
       : snapshot.offer.status === "error"
-        ? "充值页与 DSH 余额接口均不可用"
+        ? "充值页与官方余额接口均不可用"
         : snapshot.offer.status === "ok"
-          ? "充值页与 DSH 余额接口均未提供余额"
+          ? "充值页与官方余额接口均未提供余额"
           : null;
 
     const props: TideHintCardProps = {
