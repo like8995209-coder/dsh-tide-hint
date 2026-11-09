@@ -14,6 +14,8 @@ export interface TideHintCardProps {
   tokenEstimateText: string;
   balanceWarning: string | null;
   tokenBasisText: string | null;
+  balanceRefreshing: boolean;
+  onRefreshBalance: () => void;
   schedulerEnabled: boolean;
   manualLocked: boolean;
   onSchedulerEnableChange: (enabled: boolean) => void;
@@ -71,6 +73,11 @@ div[class*="footerActions"]:has(.dsh-tide-hint-card){flex-wrap:wrap}
 .dsh-tide-hint-balance-label{flex:none;color:var(--dsw-alias-label-tertiary,#8b95a5)}
 .dsh-tide-hint-balance-value{flex:none;color:var(--dsw-alias-label-primary,#111827);font-size:12px;font-weight:650}
 .dsh-tide-hint-token-value{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary,#6b7280);font-size:10px}
+.dsh-tide-hint-refresh{box-sizing:border-box;width:16px;height:16px;margin:0 0 0 auto;padding:0;border:0;border-radius:4px;background:transparent;color:var(--dsw-alias-label-secondary,#6b7280);font:inherit;font-size:14px;line-height:16px;cursor:pointer;flex:none}
+.dsh-tide-hint-refresh:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary,#111827)}
+.dsh-tide-hint-refresh:disabled{cursor:wait;opacity:.65}
+.dsh-tide-hint-refresh[data-refreshing="true"]{animation:dth-refresh-spin .8s linear infinite}
+@keyframes dth-refresh-spin{to{transform:rotate(360deg)}}
 .dsh-tide-hint-meta-row{display:flex;align-items:center;gap:4px;min-width:0;line-height:10px}
 .dsh-tide-hint-meta{display:block;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;line-height:10px;color:var(--dsw-alias-label-tertiary,#8b95a5)}
 .dsh-tide-hint-controls{display:flex;align-items:center;gap:5px;flex:none;font-size:9px;line-height:10px;color:var(--dsw-alias-label-secondary,#6b7280)}
@@ -137,6 +144,7 @@ export function createTideHintCard(React: ReactRuntime) {
       props.offerText,
       `余额 ${props.balanceText}`,
       `约 ${props.tokenEstimateText} tokens`,
+      props.balanceRefreshing ? "余额刷新中" : "余额可刷新",
       `自动调度${props.schedulerEnabled ? "开启" : "关闭"}`,
       `手动锁定${props.manualLocked ? "开启" : "关闭"}`,
       warningText,
@@ -170,6 +178,20 @@ export function createTideHintCard(React: ReactRuntime) {
           <span className="dsh-tide-hint-balance-label">余额</span>
           <b className="dsh-tide-hint-balance-value">{props.balanceText}</b>
           <span className="dsh-tide-hint-token-value">≈ {props.tokenEstimateText} tokens</span>
+          <button
+            type="button"
+            className="dsh-tide-hint-refresh"
+            data-refreshing={props.balanceRefreshing ? "true" : "false"}
+            disabled={props.balanceRefreshing}
+            title={props.balanceRefreshing ? "正在刷新余额" : "刷新余额"}
+            aria-label="刷新余额"
+            onClick={(event) => {
+              event.stopPropagation();
+              props.onRefreshBalance();
+            }}
+          >
+            ↻
+          </button>
         </span>
         <span className="dsh-tide-hint-meta-row">
           <span className="dsh-tide-hint-meta">

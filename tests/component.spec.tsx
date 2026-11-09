@@ -48,6 +48,8 @@ function cardProps(overrides: Partial<TideHintCardProps> = {}): TideHintCardProp
     tokenEstimateText: "10.00 亿",
     balanceWarning: null,
     tokenBasisText: "deepseek-flash 输入（缓存未命中） · ¥1/百万 tokens",
+    balanceRefreshing: false,
+    onRefreshBalance: vi.fn(),
     schedulerEnabled: false,
     manualLocked: false,
     onSchedulerEnableChange: vi.fn(),
@@ -176,6 +178,18 @@ describe("TideHintCard 视觉与文案", () => {
 
     expect(screen.getByText("¥8.89")).toBeTruthy();
     expect(screen.getByText(/≈ 0\.09 亿 tokens/)).toBeTruthy();
+  });
+
+  it("刷新键阻止冒泡并显示刷新中状态", () => {
+    const onRefreshBalance = vi.fn();
+    const Card = createTideHintCard(React);
+    const { rerender } = render(<Card {...cardProps({ onRefreshBalance })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新余额" }));
+    expect(onRefreshBalance).toHaveBeenCalledTimes(1);
+
+    rerender(<Card {...cardProps({ onRefreshBalance, balanceRefreshing: true })} />);
+    expect((screen.getByRole("button", { name: "刷新余额" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("点击目标严格指向硬编码官方充值页", () => {
@@ -384,6 +398,38 @@ describe("每日首次刷新与降级", () => {
       balanceCny: 16,
       balanceSource: "dsh-usage",
       balanceAttempted: true,
+    });
+    harness.dispose();
+  });
+
+  it("点击刷新键立即重新读取余额并更新 token 折算", async () => {
+    installDailyCache();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("deepseek-usage")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          provider: { kind: "balance" },
+          balance: { isAvailable: true, total: 20, currency: "CNY" },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return url.includes("resource=offer")
+        ? okResponse("<p>请选择充值金额</p>")
+        : okResponse(PRICING_HTML);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshClientModule();
+    const harness = mountPlugin(mod);
+    render(React.createElement(harness.component));
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新余额" }));
+    await flushAsyncWork();
+
+    expect(screen.getAllByText("¥20.00").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/≈ 0\.10 亿 tokens/).length).toBeGreaterThan(0);
+    expect(JSON.parse(localStorage.getItem(OFFER_CACHE_KEY) || "{}")).toMatchObject({
+      balanceCny: 20,
+      balanceSource: "dsh-usage",
     });
     harness.dispose();
   });

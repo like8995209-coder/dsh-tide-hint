@@ -49,6 +49,8 @@ const HARNESS_SOURCE = `
       tokenEstimateText: "10.00 亿",
       balanceWarning: null,
       tokenBasisText: "deepseek-flash 输入（缓存未命中） · ¥1/百万 tokens",
+      balanceRefreshing: false,
+      onRefreshBalance: () => {},
       schedulerEnabled: false,
       manualLocked: false,
       onSchedulerEnableChange: () => {},

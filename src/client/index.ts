@@ -77,6 +77,7 @@ export interface RuntimeSnapshot {
   rules: TideRules;
   offer: OfferSnapshot;
   scheduler: SchedulerState;
+  balanceRefreshing: boolean;
   loading: boolean;
 }
 
@@ -790,6 +791,37 @@ async function fetchDshUsageBalance(): Promise<number | null> {
   }
 }
 
+async function resolveOfferSnapshot(
+  previous: OfferSnapshot,
+  today: string,
+  topupHtml: string | null,
+): Promise<OfferSnapshot> {
+  let balanceCny = topupHtml === null ? null : parseOfficialBalance(topupHtml);
+  let balanceSource: OfferSnapshot["balanceSource"] = balanceCny === null ? null : "topup";
+  if (balanceCny === null) {
+    balanceCny = await fetchDshUsageBalance();
+    if (balanceCny !== null) balanceSource = "dsh-usage";
+  }
+
+  // 刷新失败时保留上次有效余额；成功但确实无余额时清空，避免伪造数字。
+  if (balanceCny === null && previous.balanceCny !== null) {
+    balanceCny = previous.balanceCny;
+    balanceSource = previous.balanceSource;
+  }
+
+  const text = topupHtml === null ? OFFER_ERROR_TEXT : (parseOfficialOffer(topupHtml) ?? NO_OFFER_TEXT);
+  return {
+    date: today,
+    text,
+    sourceUrl: TOP_UP_URL,
+    fetchedAt: new Date().toISOString(),
+    status: topupHtml === null ? "error" : "ok",
+    balanceCny,
+    balanceSource,
+    balanceAttempted: true,
+  };
+}
+
 interface DailyResult {
   rules: TideRules;
   offer: OfferSnapshot;
@@ -799,6 +831,7 @@ let dailyRefresh: { date: string; promise: Promise<DailyResult> } | null = null;
 
 async function runDailyRefresh(
   previous: TideRules,
+  previousOffer: OfferSnapshot,
   today: string,
   storage: Storage | null,
 ): Promise<DailyResult> {
@@ -856,31 +889,11 @@ async function runDailyRefresh(
     };
   }
 
-  const topupText = offerResult.status === "fulfilled"
-    ? parseOfficialOffer(offerResult.value.html)
-    : null;
-  let balanceCny = offerResult.status === "fulfilled"
-    ? parseOfficialBalance(offerResult.value.html)
-    : null;
-  let balanceSource: OfferSnapshot["balanceSource"] = balanceCny === null ? null : "topup";
-
-  // 官方公开充值页通常只返回 SPA 外壳，余额需要登录态。公开 HTML 没给出余额时，
-  // 从同一 DSH 的只读用量路由补一次；不读取或保存任何凭据。
-  if (balanceCny === null) {
-    balanceCny = await fetchDshUsageBalance();
-    if (balanceCny !== null) balanceSource = "dsh-usage";
-  }
-
-  const nextOffer: OfferSnapshot = {
-    date: today,
-    text: offerResult.status === "fulfilled" ? (topupText ?? NO_OFFER_TEXT) : OFFER_ERROR_TEXT,
-    sourceUrl: TOP_UP_URL,
-    fetchedAt: new Date().toISOString(),
-    status: offerResult.status === "fulfilled" ? "ok" : "error",
-    balanceCny,
-    balanceSource,
-    balanceAttempted: true,
-  };
+  const nextOffer = await resolveOfferSnapshot(
+    previousOffer,
+    today,
+    offerResult.status === "fulfilled" ? offerResult.value.html : null,
+  );
 
   saveCachedRules(nextRules, storage);
   saveCachedOffer(nextOffer, storage);
@@ -902,7 +915,7 @@ export function refreshRulesIfNeeded(
     return Promise.resolve(null);
   }
   if (dailyRefresh?.date === today) return dailyRefresh.promise;
-  const promise = runDailyRefresh(previous, today, storage);
+  const promise = runDailyRefresh(previous, currentOffer, today, storage);
   dailyRefresh = { date: today, promise };
   return promise;
 }
@@ -915,11 +928,13 @@ export function createRuntime(
     rules: loadCachedRules(storage),
     offer: loadCachedOffer(storage),
     scheduler: loadSchedulerState(storage),
+    balanceRefreshing: false,
     loading: false,
   };
   const listeners = new Set<() => void>();
   let disposed = false;
   let started = false;
+  let balanceRefreshFlight: Promise<void> | null = null;
 
   const emit = (next: RuntimeSnapshot) => {
     snapshot = next;
@@ -937,6 +952,7 @@ export function createRuntime(
           rules: result.rules,
           offer: result.offer,
           scheduler: snapshot.scheduler,
+          balanceRefreshing: snapshot.balanceRefreshing,
           loading: false,
         });
       })
@@ -968,6 +984,27 @@ export function createRuntime(
       ...snapshot.scheduler,
       manualLocked: Boolean(manualLocked),
     }),
+    refreshBalance: (): Promise<void> => {
+      if (disposed) return Promise.resolve();
+      if (balanceRefreshFlight !== null) return balanceRefreshFlight;
+      emit({ ...snapshot, balanceRefreshing: true });
+      balanceRefreshFlight = (async () => {
+        let topupHtml: string | null = null;
+        try {
+          topupHtml = (await fetchOfficialDocument("offer")).html;
+        } catch {
+          topupHtml = null;
+        }
+        const offer = await resolveOfferSnapshot(snapshot.offer, beijingDateKey(now()), topupHtml);
+        saveCachedOffer(offer, storage);
+        if (!disposed) emit({ ...snapshot, offer, balanceRefreshing: false });
+      })().catch(() => {
+        if (!disposed) emit({ ...snapshot, balanceRefreshing: false });
+      }).finally(() => {
+        balanceRefreshFlight = null;
+      });
+      return balanceRefreshFlight;
+    },
     schedulerTick: ({
       now: tickAt,
       isPeak,
@@ -1104,6 +1141,10 @@ function createMountedHint(React: ReactRuntime, runtime: ReturnType<typeof creat
       tokenBasisText: snapshot.rules.tokenPricing === null || inputPrice === null
         ? null
         : `${snapshot.rules.tokenPricing.model} · ¥${inputPrice}/百万 tokens`,
+      balanceRefreshing: snapshot.balanceRefreshing,
+      onRefreshBalance: () => {
+        void runtime.refreshBalance();
+      },
       schedulerEnabled: snapshot.scheduler.enabled,
       manualLocked: snapshot.scheduler.manualLocked,
       onSchedulerEnableChange: (enabled: boolean) => {
