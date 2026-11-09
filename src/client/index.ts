@@ -52,7 +52,14 @@ export interface TideRules {
   sourceUrl: string;
   parseStatus: ParseStatus;
   rawFootnoteSnippet: string;
+  tokenPricing: TokenPricing | null;
   lastError?: string;
+}
+
+export interface TokenPricing {
+  model: string;
+  inputPeak: number;
+  inputOffPeak: number;
 }
 
 export interface OfferSnapshot {
@@ -61,6 +68,7 @@ export interface OfferSnapshot {
   sourceUrl: string;
   fetchedAt: string | null;
   status: "idle" | "ok" | "error";
+  balanceCny: number | null;
 }
 
 export interface RuntimeSnapshot {
@@ -86,6 +94,7 @@ export interface ParsedPricingRules {
   weekendOffPeak: boolean;
   holidayOffPeak: boolean;
   rawFootnoteSnippet: string;
+  tokenPricing: TokenPricing | null;
 }
 
 interface DateRange {
@@ -168,6 +177,11 @@ export const BUILTIN_TIDE_RULES: TideRules = {
   sourceUrl: PRICING_URL,
   parseStatus: "fallback",
   rawFootnoteSnippet: "内置官方定价快照：工作日 09:00-12:00、14:00-18:00 为高峰，其余含周末和法定节假日为空闲。",
+  tokenPricing: {
+    model: "deepseek-flash 输入（缓存未命中）",
+    inputPeak: 2,
+    inputOffPeak: 1,
+  },
 };
 
 function pad(value: number): string {
@@ -407,6 +421,39 @@ export function extractRuleFootnote(html: string): string | null {
 }
 
 /**
+ * 取第一个模型（deepseek-flash）的缓存未命中输入价作为折算基准。
+ * 输入价高低决定可购买 token 数；界面明确标注“输入 tokens”，不把输入价与
+ * 输出价混用。价格来自与峰谷规则同一份官方定价页。
+ */
+export function parseTokenPricing(html: string): TokenPricing | null {
+  const rows = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)]
+    .map((match) => htmlToText(match[1]))
+    .filter(Boolean);
+  const inputIndex = rows.findIndex((row) => /tokens输入/.test(row) && /缓存未命中/.test(row));
+  if (inputIndex < 0) return null;
+  const outputIndex = rows.findIndex((row, index) => index > inputIndex && /tokens输出/.test(row));
+  const inputSection = rows.slice(inputIndex, outputIndex > inputIndex ? outputIndex : inputIndex + 3);
+
+  const priceOf = (rowsToSearch: string[], start: number, period: "空闲" | "高峰"): number | null => {
+    const row = rowsToSearch.slice(start).find((value) => value.includes(period));
+    if (!row) return null;
+    const match = row.match(/\d+(?:\.\d+)?/);
+    if (!match) return null;
+    const value = Number(match[0]);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  };
+
+  const inputPeak = priceOf(inputSection, 0, "高峰");
+  const inputOffPeak = priceOf(inputSection, 0, "空闲");
+  if (inputPeak === null || inputOffPeak === null) return null;
+  return {
+    model: "deepseek-flash 输入（缓存未命中）",
+    inputPeak,
+    inputOffPeak,
+  };
+}
+
+/**
  * 只接受脚注中明确写出的峰时窗口以及“周末/法定节假日空闲”条款。任一条缺失
  * 就返回 null，调用方必须沿用旧规则或内置快照，不能猜测。
  */
@@ -433,7 +480,46 @@ export function parsePricingRules(html: string): ParsedPricingRules | null {
     weekendOffPeak,
     holidayOffPeak,
     rawFootnoteSnippet: snippet,
+    tokenPricing: parseTokenPricing(html),
   };
+}
+
+/**
+ * 从充值页可见文本或内嵌状态中读取人民币余额。找不到就返回 null，
+ * 不从充值金额按钮或第三方文案猜余额。
+ */
+export function parseOfficialBalance(html: string): number | null {
+  const jsonMatch = html.match(/"(?:balance|available_balance|cash_balance)"\s*:\s*"?(\d+(?:\.\d+)?)/i);
+  if (jsonMatch) {
+    const value = Number(jsonMatch[1]);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+
+  for (const block of textBlocksFromHtml(html)) {
+    if (!/余额/.test(block)) continue;
+    const match = block.match(/(?:账户余额|可用余额|余额)[^0-9¥￥]{0,24}[¥￥]?\s*(\d+(?:\.\d+)?)/);
+    if (!match) continue;
+    const value = Number(match[1]);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
+}
+
+export function formatBalanceCny(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return `¥${value.toFixed(2)}`;
+}
+
+/** 1 亿 tokens = 100 个“百万 tokens”计价单位，因此先除以 100。 */
+export function estimateTokensYi(balanceCny: number | null, pricePerMillion: number | null): number | null {
+  if (balanceCny === null || pricePerMillion === null || balanceCny < 0 || pricePerMillion <= 0) return null;
+  return balanceCny / pricePerMillion / 100;
+}
+
+export function formatTokenEstimate(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(digits)} 亿`;
 }
 
 /**
@@ -485,6 +571,25 @@ function mergeStringDates(primary: unknown, builtin: string[]): string[] {
   return [...new Set([...builtin, ...values])].sort();
 }
 
+function normalizeTokenPricing(value: unknown): TokenPricing | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<TokenPricing>;
+  if (
+    typeof raw.model !== "string"
+    || typeof raw.inputPeak !== "number"
+    || typeof raw.inputOffPeak !== "number"
+    || !Number.isFinite(raw.inputPeak)
+    || !Number.isFinite(raw.inputOffPeak)
+    || raw.inputPeak <= 0
+    || raw.inputOffPeak <= 0
+  ) return null;
+  return {
+    model: raw.model,
+    inputPeak: raw.inputPeak,
+    inputOffPeak: raw.inputOffPeak,
+  };
+}
+
 function normalizeCachedRules(value: unknown): TideRules | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Partial<TideRules>;
@@ -514,6 +619,7 @@ function normalizeCachedRules(value: unknown): TideRules | null {
     sourceUrl: raw.sourceUrl === PRICING_URL ? PRICING_URL : PRICING_URL,
     parseStatus,
     rawFootnoteSnippet: typeof raw.rawFootnoteSnippet === "string" ? raw.rawFootnoteSnippet : "",
+    tokenPricing: normalizeTokenPricing(raw.tokenPricing) ?? BUILTIN_TIDE_RULES.tokenPricing,
     lastError: typeof raw.lastError === "string" ? raw.lastError : undefined,
   };
 }
@@ -552,6 +658,7 @@ function emptyOffer(): OfferSnapshot {
     sourceUrl: TOP_UP_URL,
     fetchedAt: null,
     status: "idle",
+    balanceCny: null,
   };
 }
 
@@ -569,6 +676,9 @@ export function loadCachedOffer(storage: Storage | null = storageOf()): OfferSna
         ? value.fetchedAt
         : null,
       status,
+      balanceCny: typeof value.balanceCny === "number" && Number.isFinite(value.balanceCny) && value.balanceCny >= 0
+        ? value.balanceCny
+        : null,
     };
   } catch {
     return emptyOffer();
@@ -680,6 +790,7 @@ async function runDailyRefresh(
         sourceUrl: PRICING_URL,
         parseStatus: "ok",
         rawFootnoteSnippet: rawSnippet,
+        tokenPricing: parsed.tokenPricing ?? previous.tokenPricing,
         lastError: undefined,
       };
     } else {
@@ -710,12 +821,14 @@ async function runDailyRefresh(
   let nextOffer: OfferSnapshot;
   if (offerResult.status === "fulfilled") {
     const text = parseOfficialOffer(offerResult.value.html);
+    const balanceCny = parseOfficialBalance(offerResult.value.html);
     nextOffer = {
       date: today,
       text: text ?? NO_OFFER_TEXT,
       sourceUrl: TOP_UP_URL,
       fetchedAt: new Date().toISOString(),
       status: "ok",
+      balanceCny,
     };
   } else {
     nextOffer = {
@@ -724,6 +837,7 @@ async function runDailyRefresh(
       sourceUrl: TOP_UP_URL,
       fetchedAt: new Date().toISOString(),
       status: "error",
+      balanceCny: null,
     };
   }
 
@@ -919,6 +1033,17 @@ function createMountedHint(React: ReactRuntime, runtime: ReturnType<typeof creat
       && !rulesCoverYear(snapshot.rules, beijingParts(now).year)
     ) ? `${beijingParts(now).year} 年节假日数据未覆盖，按工作日估算` : null;
     const warning = [coverageWarning, snapshot.rules.lastError].filter(Boolean).join("；") || null;
+    const inputPrice = snapshot.rules.tokenPricing === null
+      ? null
+      : current.isPeak
+        ? snapshot.rules.tokenPricing.inputPeak
+        : snapshot.rules.tokenPricing.inputOffPeak;
+    const tokenEstimate = estimateTokensYi(snapshot.offer.balanceCny, inputPrice);
+    const balanceWarning = snapshot.offer.status === "error"
+      ? "官方充值页读取失败，余额不可用"
+      : snapshot.offer.status === "ok" && snapshot.offer.balanceCny === null
+        ? "官方充值页未提供余额"
+        : null;
 
     const props: TideHintCardProps = {
       statusLabel: current.isPeak ? "峰时·原价" : "谷时·半价",
@@ -930,6 +1055,12 @@ function createMountedHint(React: ReactRuntime, runtime: ReturnType<typeof creat
       warning,
       offerText: snapshot.offer.text,
       offerWarning: snapshot.offer.status === "error" ? "官方优惠采集失败" : null,
+      balanceText: formatBalanceCny(snapshot.offer.balanceCny),
+      tokenEstimateText: formatTokenEstimate(tokenEstimate),
+      balanceWarning,
+      tokenBasisText: snapshot.rules.tokenPricing === null || inputPrice === null
+        ? null
+        : `${snapshot.rules.tokenPricing.model} · ¥${inputPrice}/百万 tokens`,
       schedulerEnabled: snapshot.scheduler.enabled,
       manualLocked: snapshot.scheduler.manualLocked,
       onSchedulerEnableChange: (enabled: boolean) => {

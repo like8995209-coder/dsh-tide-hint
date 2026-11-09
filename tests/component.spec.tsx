@@ -44,6 +44,10 @@ function cardProps(overrides: Partial<TideHintCardProps> = {}): TideHintCardProp
     warning: null,
     offerText: "官方无额外充值优惠",
     offerWarning: null,
+    balanceText: "¥10.00",
+    tokenEstimateText: "10.00 亿",
+    balanceWarning: null,
+    tokenBasisText: "deepseek-flash 输入（缓存未命中） · ¥1/百万 tokens",
     schedulerEnabled: false,
     manualLocked: false,
     onSchedulerEnableChange: vi.fn(),
@@ -73,6 +77,7 @@ function installDailyCache(options: {
     sourceUrl: TOP_UP_URL,
     fetchedAt: "2026-11-09T02:00:00.000Z",
     status: "ok",
+    balanceCny: 10,
   }));
 }
 
@@ -161,6 +166,14 @@ describe("TideHintCard 视觉与文案", () => {
     expect(screen.getAllByText("峰时·原价").length).toBeGreaterThanOrEqual(1);
     expect(css).toContain("var(--dsw-alias-state-error-primary,#ef4444)");
     expect(screen.getByRole("link").getAttribute("data-peak")).toBe("true");
+  });
+
+  it("显示余额和折算 token（亿）", () => {
+    const Card = createTideHintCard(React);
+    render(<Card {...cardProps({ balanceText: "¥8.89", tokenEstimateText: "0.09 亿" })} />);
+
+    expect(screen.getByText("¥8.89")).toBeTruthy();
+    expect(screen.getByText(/≈ 0\.09 亿 tokens/)).toBeTruthy();
   });
 
   it("点击目标严格指向硬编码官方充值页", () => {

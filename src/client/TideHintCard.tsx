@@ -10,6 +10,10 @@ export interface TideHintCardProps {
   warning: string | null;
   offerText: string;
   offerWarning: string | null;
+  balanceText: string;
+  tokenEstimateText: string;
+  balanceWarning: string | null;
+  tokenBasisText: string | null;
   schedulerEnabled: boolean;
   manualLocked: boolean;
   onSchedulerEnableChange: (enabled: boolean) => void;
@@ -26,13 +30,14 @@ const CARD_CSS = `
   --dth-color:var(--dsw-alias-state-success-primary,#10b981);
   box-sizing:border-box;
   position:relative;
-  width:100%;
-  min-width:0;
-  flex:1 1 100%;
-  height:30px;
-  min-height:30px;
-  max-height:30px;
-  padding:2px 8px;
+  width:264px;
+  min-width:264px;
+  max-width:264px;
+  flex:0 0 264px;
+  height:50px;
+  min-height:50px;
+  max-height:50px;
+  padding:3px 8px;
   border:1px solid color-mix(in srgb,var(--dth-color) 32%,transparent);
   border-radius:8px;
   background:color-mix(in srgb,var(--dth-color) 8%,var(--dsw-alias-bg-layer-1,transparent));
@@ -42,7 +47,7 @@ const CARD_CSS = `
   display:flex;
   flex-direction:column;
   justify-content:center;
-  gap:0;
+  gap:1px;
   overflow:visible;
   font:var(--dsw-font-xxxs-11,11px/1.2 system-ui,sans-serif);
   transition:border-color .15s ease,background-color .15s ease;
@@ -62,6 +67,10 @@ div[class*="footerActions"]:has(.dsh-tide-hint-card){flex-wrap:wrap}
 .dsh-tide-hint-status{flex:none;color:var(--dth-color);font-weight:650;white-space:nowrap}
 .dsh-tide-hint-count{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#111827);font-variant-numeric:tabular-nums}
 .dsh-tide-hint-count b{font-weight:600}
+.dsh-tide-hint-balance-row{display:flex;align-items:baseline;gap:5px;min-width:0;overflow:hidden;white-space:nowrap;line-height:14px;font-size:11px}
+.dsh-tide-hint-balance-label{flex:none;color:var(--dsw-alias-label-tertiary,#8b95a5)}
+.dsh-tide-hint-balance-value{flex:none;color:var(--dsw-alias-label-primary,#111827);font-size:12px;font-weight:650}
+.dsh-tide-hint-token-value{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary,#6b7280);font-size:10px}
 .dsh-tide-hint-meta-row{display:flex;align-items:center;gap:4px;min-width:0;line-height:10px}
 .dsh-tide-hint-meta{display:block;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;line-height:10px;color:var(--dsw-alias-label-tertiary,#8b95a5)}
 .dsh-tide-hint-controls{display:flex;align-items:center;gap:5px;flex:none;font-size:9px;line-height:10px;color:var(--dsw-alias-label-secondary,#6b7280)}
@@ -115,7 +124,7 @@ div[class*="footerActions"]:has(.dsh-tide-hint-card){flex-wrap:wrap}
  */
 export function createTideHintCard(React: ReactRuntime) {
   function TideHintCard(props: TideHintCardProps) {
-    const warningText = [props.warning, props.offerWarning].filter(Boolean).join("；");
+    const warningText = [props.warning, props.offerWarning, props.balanceWarning].filter(Boolean).join("；");
     const openTopUp = () => {
       const opened = window.open(TOP_UP_URL, "_blank");
       if (opened) opened.opener = null;
@@ -126,6 +135,8 @@ export function createTideHintCard(React: ReactRuntime) {
       props.updatedText,
       props.offlineText,
       props.offerText,
+      `余额 ${props.balanceText}`,
+      `约 ${props.tokenEstimateText} tokens`,
       `自动调度${props.schedulerEnabled ? "开启" : "关闭"}`,
       `手动锁定${props.manualLocked ? "开启" : "关闭"}`,
       warningText,
@@ -154,6 +165,11 @@ export function createTideHintCard(React: ReactRuntime) {
           <span className="dsh-tide-hint-count">
             距切换 <b>{props.countdown}</b>
           </span>
+        </span>
+        <span className="dsh-tide-hint-balance-row">
+          <span className="dsh-tide-hint-balance-label">余额</span>
+          <b className="dsh-tide-hint-balance-value">{props.balanceText}</b>
+          <span className="dsh-tide-hint-token-value">≈ {props.tokenEstimateText} tokens</span>
         </span>
         <span className="dsh-tide-hint-meta-row">
           <span className="dsh-tide-hint-meta">
@@ -197,6 +213,12 @@ export function createTideHintCard(React: ReactRuntime) {
         <span className="dsh-tide-hint-pop" role="tooltip">
           <span className="dsh-tide-hint-pop-title">{props.statusLabel}</span>
           <span className="dsh-tide-hint-pop-row">距切换 {props.countdown} · {props.targetText}</span>
+          <span className="dsh-tide-hint-pop-row">
+            余额 {props.balanceText} · 约 {props.tokenEstimateText} tokens
+          </span>
+          {props.tokenBasisText ? (
+            <span className="dsh-tide-hint-pop-row">折算基准：{props.tokenBasisText}</span>
+          ) : null}
           <span className="dsh-tide-hint-pop-row">{props.offlineText ?? props.updatedText}</span>
           {props.offlineText ? (
             <span className="dsh-tide-hint-pop-row">{props.updatedText}</span>

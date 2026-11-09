@@ -14,9 +14,21 @@ DSH 侧边栏峰谷价格提示。以固定北京时间显示当前是“谷时�
 - 倒计时正确处理跨零点、周末、法定节假日和调休：例如周五 18:00 后指向下周一 09:00；长假指向节后首个工作日 09:00。
 - 当前年无节假日数据时显示“按工作日估算”警告。
 - 每个北京日期首次启动时异步更新定价规则和官方充值优惠；初始渲染不等待网络，失败时保留上次规则或内置快照，倒计时不阻塞。
-- 规则缓存键为 `dsh-tide-hint.rules`，包含 `peakWindows`、`weekendOffPeak`、`holidayOffPeak`、`holidays`、`makeupWorkdays`、`lastFetchedDate`、`fetchedAt`、`sourceUrl`、`parseStatus` 和 `rawFootnoteSnippet`。
-- 官方充值优惠缓存键为 `dsh-tide-hint.offer`。没有活动时显示“官方无额外充值优惠”。
+- 规则缓存键为 `dsh-tide-hint.rules`，包含 `peakWindows`、`weekendOffPeak`、`holidayOffPeak`、`holidays`、`makeupWorkdays`、`tokenPricing`、`lastFetchedDate`、`fetchedAt`、`sourceUrl`、`parseStatus` 和 `rawFootnoteSnippet`。
+- 官方充值页缓存键为 `dsh-tide-hint.offer`，同时保存余额和充值优惠状态。没有活动时显示“官方无额外充值优惠”。
 - 点击整条提示或优惠文案只会在新标签打开硬编码的 DeepSeek 官方充值页。
+
+## 余额与 token 折算
+
+卡片第二行显示从官方充值页读取到的人民币余额，并按当前峰谷时段折算 DeepSeek Flash 的缓存未命中**输入 tokens**：
+
+```text
+余额 ¥8.89   ≈ 0.09 亿 tokens
+```
+
+折算基准来自同一份官方定价页；目前选中表格第一列 `deepseek-flash` 的“百万tokens输入（缓存未命中）”价格，峰时与谷时分别取各自单价。1 亿 tokens 等于 100 个“百万 tokens”计价单位。悬停气泡会显示当前使用的折算单价。
+
+充值页未提供余额时会显示 `余额 —`，不会用充值金额按钮或第三方数据猜测。充值页读取失败时保留倒计时和其他峰谷功能，并在提示中显示余额不可用。
 
 ## 自动调度信号
 
@@ -61,7 +73,7 @@ window.DSHTideHint?.setManualLock(false);
 window.DSHTideHint?.setManualLock(true);
 ```
 
-调度开关、手动锁定标记、预警时间戳和已预警边界保存在
+卡片使用固定 `264px` 宽度，高度调整为 `50px`，以容纳余额、折算结果和调度复选框。调度开关、手动锁定标记、预警时间戳和已预警边界保存在
 `localStorage["dsh-tide-hint.scheduler"]`。预警按边界防抖，同一个峰时开始边界最多触发一次。
 
 ## 数据来源与网络行为

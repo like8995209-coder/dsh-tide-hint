@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BUILTIN_TIDE_RULES,
+  estimateTokensYi,
   formatCountdown,
+  formatTokenEstimate,
   nextTransitionAt,
+  parseOfficialBalance,
+  parseTokenPricing,
   tideStateAt,
 } from "../src/client/index";
 import {
@@ -200,5 +204,35 @@ describe("自动调度信号", () => {
     saveSchedulerState(state, storage);
     expect(values.has(SCHEDULER_CACHE_KEY)).toBe(true);
     expect(loadSchedulerState(storage)).toEqual(state);
+  });
+});
+
+describe("余额与 token 折算", () => {
+  it("从充值页读取人民币余额", () => {
+    expect(parseOfficialBalance("<p>账户余额：¥8.89</p>")).toBe(8.89);
+    expect(parseOfficialBalance('<script>window.state={"balance":12.5}</script>')).toBe(12.5);
+    expect(parseOfficialBalance("<p>请选择充值金额</p>")).toBeNull();
+  });
+
+  it("从定价页读取 Flash 峰谷输入价", () => {
+    const html = `
+      <table>
+        <tr><td rowspan="2">百万tokens输入<br>（缓存未命中）</td><td>空闲时段</td><td>1元</td><td>4.5元</td></tr>
+        <tr><td>高峰时段</td><td>2元</td><td>9.0元</td></tr>
+        <tr><td>百万tokens输出</td><td>空闲时段</td><td>4元</td><td>13.5元</td></tr>
+      </table>
+    `;
+    expect(parseTokenPricing(html)).toEqual({
+      model: "deepseek-flash 输入（缓存未命中）",
+      inputPeak: 2,
+      inputOffPeak: 1,
+    });
+  });
+
+  it("按 1 亿 tokens 折算并格式化", () => {
+    expect(estimateTokensYi(100, 1)).toBe(1);
+    expect(estimateTokensYi(8.89, 1)).toBeCloseTo(0.0889, 6);
+    expect(formatTokenEstimate(0.0889)).toBe("0.09 亿");
+    expect(formatTokenEstimate(null)).toBe("—");
   });
 });
