@@ -10,6 +10,10 @@ export interface TideHintCardProps {
   warning: string | null;
   offerText: string;
   offerWarning: string | null;
+  schedulerEnabled: boolean;
+  manualLocked: boolean;
+  onSchedulerEnableChange: (enabled: boolean) => void;
+  onManualLockChange: (locked: boolean) => void;
   loading: boolean;
 }
 
@@ -58,7 +62,11 @@ div[class*="footerActions"]:has(.dsh-tide-hint-card){flex-wrap:wrap}
 .dsh-tide-hint-status{flex:none;color:var(--dth-color);font-weight:650;white-space:nowrap}
 .dsh-tide-hint-count{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#111827);font-variant-numeric:tabular-nums}
 .dsh-tide-hint-count b{font-weight:600}
-.dsh-tide-hint-meta{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;line-height:10px;color:var(--dsw-alias-label-tertiary,#8b95a5)}
+.dsh-tide-hint-meta-row{display:flex;align-items:center;gap:4px;min-width:0;line-height:10px}
+.dsh-tide-hint-meta{display:block;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;line-height:10px;color:var(--dsw-alias-label-tertiary,#8b95a5)}
+.dsh-tide-hint-controls{display:flex;align-items:center;gap:5px;flex:none;font-size:9px;line-height:10px;color:var(--dsw-alias-label-secondary,#6b7280)}
+.dsh-tide-hint-control{display:inline-flex;align-items:center;gap:2px;white-space:nowrap;cursor:pointer}
+.dsh-tide-hint-control input{width:10px;height:10px;margin:0;padding:0;accent-color:var(--dth-color);cursor:pointer}
 .dsh-tide-hint-pop{
   pointer-events:none;
   position:absolute;
@@ -108,25 +116,37 @@ div[class*="footerActions"]:has(.dsh-tide-hint-card){flex-wrap:wrap}
 export function createTideHintCard(React: ReactRuntime) {
   function TideHintCard(props: TideHintCardProps) {
     const warningText = [props.warning, props.offerWarning].filter(Boolean).join("；");
+    const openTopUp = () => {
+      const opened = window.open(TOP_UP_URL, "_blank");
+      if (opened) opened.opener = null;
+    };
     const accessibleLabel = [
       props.statusLabel,
       `距切换 ${props.countdown}`,
       props.updatedText,
       props.offlineText,
       props.offerText,
+      `自动调度${props.schedulerEnabled ? "开启" : "关闭"}`,
+      `手动锁定${props.manualLocked ? "开启" : "关闭"}`,
       warningText,
     ].filter(Boolean).join("，");
 
     return (
-      <a
+      <div
         className="dsh-tide-hint-card"
-        href={TOP_UP_URL}
-        target="_blank"
-        rel="noopener noreferrer"
+        role="link"
+        tabIndex={0}
         data-peak={props.isPeak ? "true" : "false"}
         data-loading={props.loading ? "true" : "false"}
         title={accessibleLabel}
         aria-label={`${accessibleLabel}。点击打开 DeepSeek 官方充值页`}
+        onClick={openTopUp}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openTopUp();
+          }
+        }}
       >
         <style>{CARD_CSS}</style>
         <span className="dsh-tide-hint-main">
@@ -135,9 +155,44 @@ export function createTideHintCard(React: ReactRuntime) {
             距切换 <b>{props.countdown}</b>
           </span>
         </span>
-        <span className="dsh-tide-hint-meta">
-          {warningText ? "⚠ " : ""}
-          {props.updatedText}
+        <span className="dsh-tide-hint-meta-row">
+          <span className="dsh-tide-hint-meta">
+            {warningText ? "⚠ " : ""}
+            {props.updatedText}
+          </span>
+          <span
+            className="dsh-tide-hint-controls"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <label
+              className="dsh-tide-hint-control"
+              onClick={(event) => event.stopPropagation()}
+              title="谷时发送任务启动信号，峰时发送停止信号"
+            >
+              <input
+                type="checkbox"
+                checked={props.schedulerEnabled}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => props.onSchedulerEnableChange(event.currentTarget.checked)}
+                aria-label="自动调度"
+              />
+              自动调度
+            </label>
+            <label
+              className="dsh-tide-hint-control"
+              onClick={(event) => event.stopPropagation()}
+              title="锁定后停止发送自动调度信号"
+            >
+              <input
+                type="checkbox"
+                checked={props.manualLocked}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => props.onManualLockChange(event.currentTarget.checked)}
+                aria-label="手动锁定"
+              />
+              手动锁定
+            </label>
+          </span>
         </span>
         <span className="dsh-tide-hint-pop" role="tooltip">
           <span className="dsh-tide-hint-pop-title">{props.statusLabel}</span>
@@ -149,6 +204,9 @@ export function createTideHintCard(React: ReactRuntime) {
           {warningText ? (
             <span className="dsh-tide-hint-pop-row dsh-tide-hint-warn">⚠ {warningText}</span>
           ) : null}
+          <span className="dsh-tide-hint-pop-row">
+            自动调度：{props.schedulerEnabled ? "开启" : "关闭"} · 手动锁定：{props.manualLocked ? "开启" : "关闭"}
+          </span>
           <span className="dsh-tide-hint-offer">
             <span className="dsh-tide-hint-offer-label">官方充值优惠</span>
             <span className="dsh-tide-hint-offer-text">{props.offerText}</span>
@@ -157,7 +215,7 @@ export function createTideHintCard(React: ReactRuntime) {
             </span>
           </span>
         </span>
-      </a>
+      </div>
     );
   }
 

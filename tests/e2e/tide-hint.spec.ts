@@ -45,6 +45,10 @@ const HARNESS_SOURCE = `
         : parts.year + " 年节假日数据未覆盖，按工作日估算",
       offerText: "官方无额外充值优惠",
       offerWarning: null,
+      schedulerEnabled: false,
+      manualLocked: false,
+      onSchedulerEnableChange: () => {},
+      onManualLockChange: () => {},
       loading: false,
     }));
   }

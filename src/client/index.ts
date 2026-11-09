@@ -1,5 +1,17 @@
 import type * as ReactNamespace from "react";
 import { createTideHintCard, type TideHintCardProps } from "./TideHintCard";
+import {
+  PREWARN_EVENT,
+  PREWARN_MESSAGE,
+  SCHEDULER_CACHE_KEY,
+  TASK_START_EVENT,
+  TASK_STOP_EVENT,
+  dispatchSchedulerEvent,
+  evaluateScheduler,
+  loadSchedulerState,
+  saveSchedulerState,
+  type SchedulerState,
+} from "./scheduler";
 
 export const PRICING_URL = "https://api-docs.deepseek.com/zh-cn/quick_start/pricing";
 export const TOP_UP_URL = "https://platform.deepseek.com/top_up";
@@ -8,6 +20,15 @@ export const OFFER_CACHE_KEY = "dsh-tide-hint.offer";
 export const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 export const FETCH_TIMEOUT_MS = 5_000;
 export const HOST_OFFICIAL_PATH = "api/dsh-tide-hint/official";
+
+export {
+  PREWARN_EVENT,
+  PREWARN_MESSAGE,
+  SCHEDULER_CACHE_KEY,
+  TASK_START_EVENT,
+  TASK_STOP_EVENT,
+  type SchedulerState,
+};
 
 /** 需求指定的优先 Slot；本机 DSH 0.2.x 实际存在的是第三项 footer.action。 */
 export const SLOT_CANDIDATES = ["sidebar.footer", "sidebar.userArea", "sidebar.footer.action"] as const;
@@ -45,7 +66,19 @@ export interface OfferSnapshot {
 export interface RuntimeSnapshot {
   rules: TideRules;
   offer: OfferSnapshot;
+  scheduler: SchedulerState;
   loading: boolean;
+}
+
+export interface DSHTideHintApi {
+  setSchedulerEnable(enabled: boolean): SchedulerState;
+  setManualLock(locked: boolean): SchedulerState;
+}
+
+declare global {
+  interface Window {
+    DSHTideHint?: DSHTideHintApi;
+  }
 }
 
 export interface ParsedPricingRules {
@@ -726,6 +759,7 @@ export function createRuntime(
   let snapshot: RuntimeSnapshot = {
     rules: loadCachedRules(storage),
     offer: loadCachedOffer(storage),
+    scheduler: loadSchedulerState(storage),
     loading: false,
   };
   const listeners = new Set<() => void>();
@@ -744,12 +778,24 @@ export function createRuntime(
     void refreshRulesIfNeeded(snapshot.rules, snapshot.offer, now(), storage)
       .then((result) => {
         if (disposed || !result) return;
-        emit({ rules: result.rules, offer: result.offer, loading: false });
+        emit({
+          rules: result.rules,
+          offer: result.offer,
+          scheduler: snapshot.scheduler,
+          loading: false,
+        });
       })
       .catch(() => {
         if (disposed) return;
         emit({ ...snapshot, loading: false });
       });
+  };
+
+  const updateScheduler = (next: SchedulerState): SchedulerState => {
+    if (disposed) return snapshot.scheduler;
+    saveSchedulerState(next, storage);
+    emit({ ...snapshot, scheduler: next });
+    return next;
   };
 
   return {
@@ -759,6 +805,63 @@ export function createRuntime(
       return () => listeners.delete(listener);
     },
     start,
+    setSchedulerEnable: (enabled: boolean) => updateScheduler({
+      ...snapshot.scheduler,
+      enabled: Boolean(enabled),
+    }),
+    setManualLock: (manualLocked: boolean) => updateScheduler({
+      ...snapshot.scheduler,
+      manualLocked: Boolean(manualLocked),
+    }),
+    schedulerTick: ({
+      now: tickAt,
+      isPeak,
+      nextBoundary,
+      nextBoundaryIsPeak,
+    }: {
+      now: number;
+      isPeak: boolean;
+      nextBoundary: number | null;
+      nextBoundaryIsPeak: boolean;
+    }) => {
+      const result = evaluateScheduler({
+        now: tickAt,
+        isPeak,
+        nextBoundary,
+        nextBoundaryIsPeak,
+      }, snapshot.scheduler);
+
+      if (result.state !== snapshot.scheduler) {
+        saveSchedulerState(result.state, storage);
+        emit({ ...snapshot, scheduler: result.state });
+      }
+
+      if (result.signal !== null) {
+        dispatchSchedulerEvent(
+          result.signal === "start" ? TASK_START_EVENT : TASK_STOP_EVENT,
+          {
+            source: "dsh-tide-hint",
+            signal: result.signal,
+            isPeak,
+            at: tickAt,
+            nextBoundary,
+          },
+        );
+      }
+
+      if (result.prewarn) {
+        dispatchSchedulerEvent(PREWARN_EVENT, {
+          source: "dsh-tide-hint",
+          message: PREWARN_MESSAGE,
+          text: PREWARN_MESSAGE,
+          isPeak,
+          at: tickAt,
+          targetAt: nextBoundary,
+          remainingSeconds: nextBoundary === null ? null : Math.ceil((nextBoundary - tickAt) / 1000),
+        });
+      }
+      return result;
+    },
     dispose: () => {
       disposed = true;
       listeners.clear();
@@ -783,9 +886,23 @@ function createMountedHint(React: ReactRuntime, runtime: ReturnType<typeof creat
     const [now, setNow] = React.useState(() => Date.now());
 
     React.useEffect(() => {
-      const timer = window.setInterval(() => setNow(Date.now()), 1000);
+      const tick = () => {
+        const tickAt = Date.now();
+        const rules = runtime.getSnapshot().rules;
+        const currentState = tideStateAt(tickAt, rules);
+        const boundary = nextTransitionAt(tickAt, rules);
+        runtime.schedulerTick({
+          now: tickAt,
+          isPeak: currentState.isPeak,
+          nextBoundary: boundary,
+          nextBoundaryIsPeak: boundary === null ? false : tideStateAt(boundary, rules).isPeak,
+        });
+        setNow(tickAt);
+      };
+      tick();
+      const timer = window.setInterval(tick, 1000);
       return () => window.clearInterval(timer);
-    }, []);
+    }, [runtime]);
 
     const current = tideStateAt(now, snapshot.rules);
     const target = nextTransitionAt(now, snapshot.rules);
@@ -813,6 +930,14 @@ function createMountedHint(React: ReactRuntime, runtime: ReturnType<typeof creat
       warning,
       offerText: snapshot.offer.text,
       offerWarning: snapshot.offer.status === "error" ? "官方优惠采集失败" : null,
+      schedulerEnabled: snapshot.scheduler.enabled,
+      manualLocked: snapshot.scheduler.manualLocked,
+      onSchedulerEnableChange: (enabled: boolean) => {
+        runtime.setSchedulerEnable(enabled);
+      },
+      onManualLockChange: (locked: boolean) => {
+        runtime.setManualLock(locked);
+      },
       loading: snapshot.loading,
     };
     return React.createElement(TideHintCard, props);
@@ -926,11 +1051,25 @@ export function createClientPlugin(React: ReactRuntime) {
       const runtime = createRuntime();
       const MountedHint = createMountedHint(React, runtime);
       const component = (_props: unknown) => React.createElement(MountedHint, null);
+      const previousApi = typeof window === "undefined" ? undefined : window.DSHTideHint;
+      const api: DSHTideHintApi = {
+        setSchedulerEnable: (enabled: boolean) => runtime.setSchedulerEnable(enabled),
+        setManualLock: (locked: boolean) => runtime.setManualLock(locked),
+      };
+      if (typeof window !== "undefined") window.DSHTideHint = api;
+      const restoreApi = () => {
+        if (typeof window !== "undefined" && window.DSHTideHint === api) {
+          window.DSHTideHint = previousApi;
+        }
+      };
 
       if (typeof ctx.effect === "function") {
         ctx.effect(() => {
           runtime.start();
-          return () => runtime.dispose();
+          return () => {
+            runtime.dispose();
+            restoreApi();
+          };
         }, "dsh-tide-hint: daily rules refresh");
         ctx.effect(() => mountTideHintSlot(ctx, component), "dsh-tide-hint: slot");
       } else {

@@ -18,6 +18,52 @@ DSH 侧边栏峰谷价格提示。以固定北京时间显示当前是“谷时�
 - 官方充值优惠缓存键为 `dsh-tide-hint.offer`。没有活动时显示“官方无额外充值优惠”。
 - 点击整条提示或优惠文案只会在新标签打开硬编码的 DeepSeek 官方充值页。
 
+## 自动调度信号
+
+调度默认关闭。卡片内的“自动调度”和“手动锁定”复选框可随时切换；点击复选框不会触发卡片跳转。调度开启且未锁定时，它复用同一套 UTC+8、节假日、调休和峰谷判定，并在原有每秒 tick 中持续派发：
+
+- 谷时：`dsh-tide:task-start`
+- 峰时：`dsh-tide:task-stop`
+- 距下一次峰时开始不超过 60 秒：单次 `dsh-tide:prewarn`
+
+预警文案固定为：
+
+```text
+距峰时原价时段60秒，即将自动停止后台任务。
+```
+
+插件只发送事件信号，不维护外部业务任务状态，也不会代替外部任务执行暂停、恢复或重试。外部即使在峰值期间暂停任务，下一个谷时 tick 仍会再次收到启动信号。
+
+订阅示例：
+
+```js
+window.addEventListener("dsh-tide:task-start", (event) => {
+  // event.detail: { source, signal, isPeak, at, nextBoundary }
+  startBackgroundWork();
+});
+
+window.addEventListener("dsh-tide:task-stop", (event) => {
+  stopBackgroundWork();
+});
+
+window.addEventListener("dsh-tide:prewarn", (event) => {
+  console.info(event.detail.text);
+});
+```
+
+运行时 API：
+
+```js
+window.DSHTideHint?.setSchedulerEnable(true);
+window.DSHTideHint?.setManualLock(false);
+
+// 锁定后立即停止发送自动调度信号；解锁后下一个 tick 恢复。
+window.DSHTideHint?.setManualLock(true);
+```
+
+调度开关、手动锁定标记、预警时间戳和已预警边界保存在
+`localStorage["dsh-tide-hint.scheduler"]`。预警按边界防抖，同一个峰时开始边界最多触发一次。
+
 ## 数据来源与网络行为
 
 定价规则来源：
@@ -36,7 +82,7 @@ DSH 侧边栏峰谷价格提示。以固定北京时间显示当前是“谷时�
 
 ## 零 Token 约束
 
-插件运行时不调用任何 LLM 或模型 API，不注入系统提示，不修改对话请求，也不会产生 token 消耗。优惠文案直接来自官方页面文本或固定模板，不经模型生成。
+插件运行时不调用任何 LLM 或模型 API，不注入系统提示，不修改对话请求，也不会产生 token 消耗。优惠文案直接来自官方页面文本或固定模板，不经模型生成；自动调度也只发送本地 DOM 事件。
 
 ## 安装与构建
 

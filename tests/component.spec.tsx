@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BUILTIN_TIDE_RULES,
   OFFER_CACHE_KEY,
+  PREWARN_EVENT,
   RULES_CACHE_KEY,
+  SCHEDULER_CACHE_KEY,
+  TASK_START_EVENT,
   TOP_UP_URL,
 } from "../src/client/index";
 import {
@@ -41,6 +44,10 @@ function cardProps(overrides: Partial<TideHintCardProps> = {}): TideHintCardProp
     warning: null,
     offerText: "官方无额外充值优惠",
     offerWarning: null,
+    schedulerEnabled: false,
+    manualLocked: false,
+    onSchedulerEnableChange: vi.fn(),
+    onManualLockChange: vi.fn(),
     loading: false,
     ...overrides,
   };
@@ -162,12 +169,31 @@ describe("TideHintCard 视觉与文案", () => {
     const { container } = render(<Card {...cardProps()} />);
     const link = screen.getByRole("link");
 
-    expect(link.getAttribute("href")).toBe(TOP_UP_URL);
-    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("role")).toBe("link");
     fireEvent.click(link);
 
     expect(openSpy).toHaveBeenCalledTimes(1);
     expect(openSpy).toHaveBeenCalledWith(TOP_UP_URL, "_blank");
+  });
+
+  it("调度复选框点击不触发卡片跳转并更新回调", () => {
+    const onSchedulerEnableChange = vi.fn();
+    const onManualLockChange = vi.fn();
+    const Card = createTideHintCard(React);
+    render(
+      <Card
+        {...cardProps({
+          onSchedulerEnableChange,
+          onManualLockChange,
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("自动调度"));
+    fireEvent.click(screen.getByLabelText("手动锁定"));
+
+    expect(onSchedulerEnableChange).toHaveBeenCalledWith(true);
+    expect(onManualLockChange).toHaveBeenCalledWith(true);
   });
 });
 
@@ -213,6 +239,61 @@ describe("运行时倒计时与更新时间", () => {
 
     expect(screen.getAllByText("离线规则（内置快照）").length).toBeGreaterThan(0);
     expect(screen.getByText(/⚠ 官网规则解析失败/)).toBeTruthy();
+    harness.dispose();
+  });
+
+  it("window.DSHTideHint API 更新并持久化调度状态", async () => {
+    installDailyCache();
+    vi.stubGlobal("fetch", vi.fn());
+    const mod = await freshClientModule();
+    const harness = mountPlugin(mod);
+    render(React.createElement(harness.component));
+
+    expect(window.DSHTideHint).toBeTruthy();
+    window.DSHTideHint?.setSchedulerEnable(true);
+    window.DSHTideHint?.setManualLock(true);
+
+    expect(JSON.parse(localStorage.getItem(SCHEDULER_CACHE_KEY) || "{}")).toMatchObject({
+      enabled: true,
+      manualLocked: true,
+    });
+    harness.dispose();
+  });
+
+  it("复用每秒 tick 派发启动信号和单次峰时预警", async () => {
+    vi.setSystemTime(new Date("2026-11-09T13:59:10+08:00"));
+    installDailyCache();
+    localStorage.setItem(SCHEDULER_CACHE_KEY, JSON.stringify({
+      enabled: true,
+      manualLocked: false,
+      prewarnAt: null,
+      prewarnBoundary: null,
+    }));
+    vi.stubGlobal("fetch", vi.fn());
+    const starts: CustomEvent[] = [];
+    const prewarns: CustomEvent[] = [];
+    const onStart = (event: Event) => starts.push(event as CustomEvent);
+    const onPrewarn = (event: Event) => prewarns.push(event as CustomEvent);
+    window.addEventListener(TASK_START_EVENT, onStart);
+    window.addEventListener(PREWARN_EVENT, onPrewarn);
+
+    const mod = await freshClientModule();
+    const harness = mountPlugin(mod);
+    render(React.createElement(harness.component));
+
+    expect(starts.length).toBe(1);
+    expect(starts[0].detail.signal).toBe("start");
+    expect(prewarns.length).toBe(1);
+    expect(prewarns[0].detail.message).toBe("距峰时原价时段60秒，即将自动停止后台任务。");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(prewarns.length).toBe(1);
+    expect(starts.length).toBe(2);
+
+    window.removeEventListener(TASK_START_EVENT, onStart);
+    window.removeEventListener(PREWARN_EVENT, onPrewarn);
     harness.dispose();
   });
 });
