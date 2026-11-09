@@ -69,6 +69,8 @@ export interface OfferSnapshot {
   fetchedAt: string | null;
   status: "idle" | "ok" | "error";
   balanceCny: number | null;
+  balanceSource: "topup" | "dsh-usage" | null;
+  balanceAttempted: boolean;
 }
 
 export interface RuntimeSnapshot {
@@ -659,6 +661,8 @@ function emptyOffer(): OfferSnapshot {
     fetchedAt: null,
     status: "idle",
     balanceCny: null,
+    balanceSource: null,
+    balanceAttempted: false,
   };
 }
 
@@ -679,6 +683,10 @@ export function loadCachedOffer(storage: Storage | null = storageOf()): OfferSna
       balanceCny: typeof value.balanceCny === "number" && Number.isFinite(value.balanceCny) && value.balanceCny >= 0
         ? value.balanceCny
         : null,
+      balanceSource: value.balanceSource === "topup" || value.balanceSource === "dsh-usage"
+        ? value.balanceSource
+        : null,
+      balanceAttempted: value.balanceAttempted === true,
     };
   } catch {
     return emptyOffer();
@@ -752,6 +760,36 @@ async function fetchOfficialDocument(resource: "pricing" | "offer"): Promise<{ h
   }
 }
 
+/**
+ * 兼容公开充值页不返回账户余额的情况：读取同一 DSH 内已安装的
+ * `@dougen/dsh-deepseek-usage` 同源只读路由。本插件不接触或保存 Token，
+ * 只读取它已经取到的余额数字；接口不存在或失败时返回 null。
+ */
+async function fetchDshUsageBalance(): Promise<number | null> {
+  try {
+    const response = await fetchTextWithTimeout("api/deepseek-usage?lang=zh", FETCH_TIMEOUT_MS);
+    if (!response.ok) return null;
+    const body = await response.json() as {
+      ok?: boolean;
+      provider?: { kind?: string };
+      balance?: { isAvailable?: boolean | null; total?: number | null; currency?: string | null };
+    };
+    const balance = body.balance;
+    if (
+      body.ok !== true
+      || (body.provider?.kind !== "balance" && body.provider?.kind !== undefined)
+      || balance?.isAvailable === false
+      || typeof balance?.total !== "number"
+      || !Number.isFinite(balance.total)
+      || balance.total < 0
+    ) return null;
+    if (balance.currency !== null && balance.currency !== undefined && balance.currency !== "CNY") return null;
+    return balance.total;
+  } catch {
+    return null;
+  }
+}
+
 interface DailyResult {
   rules: TideRules;
   offer: OfferSnapshot;
@@ -818,28 +856,31 @@ async function runDailyRefresh(
     };
   }
 
-  let nextOffer: OfferSnapshot;
-  if (offerResult.status === "fulfilled") {
-    const text = parseOfficialOffer(offerResult.value.html);
-    const balanceCny = parseOfficialBalance(offerResult.value.html);
-    nextOffer = {
-      date: today,
-      text: text ?? NO_OFFER_TEXT,
-      sourceUrl: TOP_UP_URL,
-      fetchedAt: new Date().toISOString(),
-      status: "ok",
-      balanceCny,
-    };
-  } else {
-    nextOffer = {
-      date: today,
-      text: OFFER_ERROR_TEXT,
-      sourceUrl: TOP_UP_URL,
-      fetchedAt: new Date().toISOString(),
-      status: "error",
-      balanceCny: null,
-    };
+  const topupText = offerResult.status === "fulfilled"
+    ? parseOfficialOffer(offerResult.value.html)
+    : null;
+  let balanceCny = offerResult.status === "fulfilled"
+    ? parseOfficialBalance(offerResult.value.html)
+    : null;
+  let balanceSource: OfferSnapshot["balanceSource"] = balanceCny === null ? null : "topup";
+
+  // 官方公开充值页通常只返回 SPA 外壳，余额需要登录态。公开 HTML 没给出余额时，
+  // 从同一 DSH 的只读用量路由补一次；不读取或保存任何凭据。
+  if (balanceCny === null) {
+    balanceCny = await fetchDshUsageBalance();
+    if (balanceCny !== null) balanceSource = "dsh-usage";
   }
+
+  const nextOffer: OfferSnapshot = {
+    date: today,
+    text: offerResult.status === "fulfilled" ? (topupText ?? NO_OFFER_TEXT) : OFFER_ERROR_TEXT,
+    sourceUrl: TOP_UP_URL,
+    fetchedAt: new Date().toISOString(),
+    status: offerResult.status === "fulfilled" ? "ok" : "error",
+    balanceCny,
+    balanceSource,
+    balanceAttempted: true,
+  };
 
   saveCachedRules(nextRules, storage);
   saveCachedOffer(nextOffer, storage);
@@ -857,7 +898,7 @@ export function refreshRulesIfNeeded(
   storage: Storage | null = storageOf(),
 ): Promise<DailyResult | null> {
   const today = beijingDateKey(now);
-  if (previous.lastFetchedDate === today && currentOffer.date === today) {
+  if (previous.lastFetchedDate === today && currentOffer.date === today && currentOffer.balanceAttempted) {
     return Promise.resolve(null);
   }
   if (dailyRefresh?.date === today) return dailyRefresh.promise;
@@ -1039,11 +1080,13 @@ function createMountedHint(React: ReactRuntime, runtime: ReturnType<typeof creat
         ? snapshot.rules.tokenPricing.inputPeak
         : snapshot.rules.tokenPricing.inputOffPeak;
     const tokenEstimate = estimateTokensYi(snapshot.offer.balanceCny, inputPrice);
-    const balanceWarning = snapshot.offer.status === "error"
-      ? "官方充值页读取失败，余额不可用"
-      : snapshot.offer.status === "ok" && snapshot.offer.balanceCny === null
-        ? "官方充值页未提供余额"
-        : null;
+    const balanceWarning = snapshot.offer.balanceCny !== null
+      ? null
+      : snapshot.offer.status === "error"
+        ? "充值页与 DSH 余额接口均不可用"
+        : snapshot.offer.status === "ok"
+          ? "充值页与 DSH 余额接口均未提供余额"
+          : null;
 
     const props: TideHintCardProps = {
       statusLabel: current.isPeak ? "峰时·原价" : "谷时·半价",

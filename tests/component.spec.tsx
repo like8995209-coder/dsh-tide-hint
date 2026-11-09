@@ -78,6 +78,8 @@ function installDailyCache(options: {
     fetchedAt: "2026-11-09T02:00:00.000Z",
     status: "ok",
     balanceCny: 10,
+    balanceSource: "topup",
+    balanceAttempted: true,
   }));
 }
 
@@ -356,13 +358,45 @@ describe("每日首次刷新与降级", () => {
     harness.dispose();
   });
 
+  it("充值页无余额时使用 DSH 同源余额并折算 token", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("deepseek-usage")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          provider: { kind: "balance" },
+          balance: { isAvailable: true, total: 16, currency: "CNY" },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return url.includes("resource=offer")
+        ? okResponse("<p>请选择充值金额</p>")
+        : okResponse(PRICING_HTML);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshClientModule();
+    const harness = mountPlugin(mod);
+    render(React.createElement(harness.component));
+    await flushAsyncWork();
+
+    expect(screen.getAllByText("¥16.00").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/≈ 0\.08 亿 tokens/).length).toBeGreaterThan(0);
+    expect(JSON.parse(localStorage.getItem(OFFER_CACHE_KEY) || "{}")).toMatchObject({
+      balanceCny: 16,
+      balanceSource: "dsh-usage",
+      balanceAttempted: true,
+    });
+    harness.dispose();
+  });
+
   it("超时后仍渲染倒计时，不抛错白屏", async () => {
-    vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) => (
-      new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => {
-          reject(new DOMException("aborted", "AbortError"));
-        });
-      })
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => (
+      String(input).includes("deepseek-usage")
+        ? Promise.resolve(okResponse(JSON.stringify({ ok: false })))
+        : new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("aborted", "AbortError"));
+            });
+          })
     )));
     const mod = await freshClientModule();
     const harness = mountPlugin(mod);
